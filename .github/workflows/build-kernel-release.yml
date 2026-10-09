@@ -154,6 +154,7 @@ jobs:
       ksu_resolved_hash:    ${{ steps.set-matrix.outputs.ksu_resolved_hash }}
       ksu_options_normalized: ${{ steps.set-matrix.outputs.ksu_options_normalized }}
       nomount_version: ${{ steps.set-matrix.outputs.nomount_version }}
+      nomount_enabled: ${{ steps.set-matrix.outputs.nomount_enabled }}
     env:
       GH_TOKEN: ${{ github.token }}
       GH_HTTP_TIMEOUT: 600
@@ -374,6 +375,16 @@ jobs:
           echo "ksu_resolved_hash=$resolved_sha" >> "$GITHUB_OUTPUT"
           
           merged_matrix=$(echo "$merged_matrix" | jq  --arg resolved_sha "$resolved_sha" 'map(.ksu_resolved_hash = $resolved_sha)')
+
+          
+          nms_on=$(jq '[.[] | select(.NMS == true)] | length' <<< "$merged_matrix")
+          nms_off=$(jq '[.[] | select(.NMS != true)] | length' <<< "$merged_matrix")
+
+          if (( nms_on > 0 )); then
+            echo "nomount_enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "nomount_enabled=false" >> "$GITHUB_OUTPUT"
+          fi
           
           mapfile -t active_keys < <(
             echo "$merged_matrix" \
@@ -406,7 +417,8 @@ jobs:
 
           echo "  ✅ NoMount version: $nomount_version"
 
-          if [ "${{ inputs.make_release }}" = "true" ] && [ "$nomount_version" = "unknown" ]; then
+          
+          if [ "${{ inputs.make_release }}" = "true" ] && [ "$nomount_version" = "unknown" ] && [ "$nms_on" -gt 0 ]; then
             echo "::error::Could not read NM_MODULE_VERSION from NoMount-Suite@${{ inputs.nomount_ref || 'main' }}. Cannot proceed with release."
             exit 1
           fi
@@ -846,8 +858,11 @@ jobs:
       REPO_OWNER: ${{ github.repository_owner }}
       REPO_NAME: ${{ github.event.repository.name }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      
       NOMOUNT_VERSION: ${{ needs.set-op-model.outputs.nomount_version }}
-      RELEASE_NAME: 'BakaSU 📦 NoMount (v${{ needs.set-op-model.outputs.nomount_version }})'
+      NMS_ENABLED: ${{ needs.set-op-model.outputs.nomount_enabled }}
+      RELEASE_NAME: ${{ needs.set-op-model.outputs.nomount_enabled == 'true' && format('BakaSU 📦 NoMount (v{0})', needs.set-op-model.outputs.nomount_version) || 'BakaSU Kernel' }}
+
     steps:
       - name: 📥 Checkout code
         uses: actions/checkout@v6
@@ -856,7 +871,11 @@ jobs:
 
       - name: 🏷️ Generate and Create New Tag
         run: |
-          TAG_BASE="nm${NOMOUNT_VERSION}"
+          if [[ "$NMS_ENABLED" == "true" ]]; then
+            TAG_BASE="nm${NOMOUNT_VERSION}"
+          else
+            TAG_BASE="bakasu"
+          fi
 
           # Highest -rN already taken, across BOTH tag refs AND release tag_names
           # (drafts included), paginated.
@@ -891,8 +910,9 @@ jobs:
           path: ./downloaded-artifacts
           merge-multiple: true
           skip-decompress: true
-
+      
       - name: 📦 Mirror the NoMount Suite add-on into this release
+        if: ${{ needs.set-op-model.outputs.nomount_enabled == 'true' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1011,6 +1031,10 @@ jobs:
               ksu_ver="${parts[4]:-unknown}"
 
               nm_ver="${NOMOUNT_VERSION:-unknown}"
+              
+              if [[ "$NMS_ENABLED" == "false" ]]; then
+                nm_ver="Disabled"
+              fi     
 
               sha="$(sha256sum "$file" | awk '{print $1}')"
               short_sha="${sha:0:12}"
@@ -1041,7 +1065,43 @@ jobs:
         id: generate-notes
         run: |
           echo "=== Start building the release notes ==="
+          
+          if [[ "$NMS_ENABLED" == "false" ]]; then
+            {
+              echo "# BakaSU Kernel"
+              echo ""
+              echo "Custom OnePlus kernels with BakaSU."
+              echo ""
+              echo "**NoMount: Disabled**"
+              echo ""
+              echo "## Kernel Downloads"
+              echo ""
+              echo "Select the ZIP matching your exact device."
+              echo ""
 
+              for file in downloaded-artifacts/AK3_*.zip; do
+                [[ -f "$file" ]] || continue
+                name="${file##*/}"
+                url="https://github.com/${{ github.repository }}/releases/download/${NEW_TAG}/${name}"
+                echo "- [\`$name\`]($url)"
+              done
+
+              echo ""
+              echo "## Installation"
+              echo ""
+              echo "1. Flash the correct kernel ZIP."
+              echo "2. Install the matching BakaSU Manager."
+              echo "3. Reboot."
+              echo ""
+              echo "NoMount Suite is not required."
+              echo ""
+              echo "Verify downloads using 00_CHECKSUMS.txt."
+            } > release_notes.md
+
+            exit 0
+         
+          fi
+          
           declare -A device_info
 
           JSON_BUILD_DATA=$(jq -c '.' ./downloaded-artifacts/matrix.json)
