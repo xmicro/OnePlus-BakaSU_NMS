@@ -69,13 +69,7 @@ on:
         required: false
         type: boolean
         default: false
-      enable_adios:
-        description: 'Enable ADIOS I/O scheduler support (5.10/5.15/6.1/6.6/6.12 kernels)'
-        required: false
-        type: boolean
-        default: false
 
-      
       # Kernel feature overrides
       # Default = use each device's JSON config
 
@@ -138,7 +132,12 @@ on:
         type: choice
         options: [Default, 'On', 'Off']
         default: Default
-      
+        
+      enable_adios:
+        description: 'Enable ADIOS I/O scheduler support (5.10/5.15/6.1/6.6/6.12 kernels)'
+        required: false
+        type: boolean
+        default: false
       nomount_ref:
         description: 'NoMount-Suite branch/ref for the Prism engine src + patches (default main; set a branch to validate it before it is released). The engine ships inside the Suite repo, under hookless/.'
         required: false
