@@ -276,12 +276,6 @@ jobs:
           )
           ' <<< "$filtered")
          
-          if [[ "${{ inputs.make_release }}" == "true" &&
-            "$FEATURE_NMS" == "Off" ]]; then
-            echo "::error::NMS-disabled releases need separate release metadata handling. Use make_release=false for testing."
-            exit 1
-          fi
-
           count=$(jq 'length' <<<"$filtered")
           
           filtered=$(echo "$filtered" | jq '
@@ -384,6 +378,12 @@ jobs:
             echo "nomount_enabled=true" >> "$GITHUB_OUTPUT"
           else
             echo "nomount_enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+          
+          if [[ "${{ inputs.make_release }}" == "true" ]] &&
+             (( nms_on > 0 && nms_off > 0 )); then
+            echo "::error::Mixed NMS release. Select NMS On or Off."
+            exit 1
           fi
           
           mapfile -t active_keys < <(
@@ -961,7 +961,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
+          rm -f ./downloaded-artifacts/ccache-binary.zip  
           if ! compgen -G "./downloaded-artifacts/*.zip" > /dev/null; then
             echo "::error::No ZIP artifacts found."
             find ./downloaded-artifacts -maxdepth 2 -type f -print || true
@@ -1202,7 +1202,7 @@ jobs:
               echo "Warning: No JSON entry found for model: $model" >&2
               features_str="N/A"
             else
-              IFS=$'\t' read -r hmbird nms bbr bbr3 bbg ttl ip_set unicode ds ntsync <<< "$feature_flags"1
+              IFS=$'\t' read -r hmbird nms bbr bbr3 bbg ttl ip_set unicode ds ntsync <<< "$feature_flags"
               [[ "$hmbird" == "true" ]] && features+=("🐦 HMBIRD")
               [[ "$nms" == "true" ]] && features+=("🫥 NoMount")
               if [[ "$bbr3" == "true" ]]; then
