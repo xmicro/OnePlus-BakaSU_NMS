@@ -103,6 +103,12 @@ on:
         options: [Default, 'On', 'Off']
         default: Default
 
+      feature_bbg:
+        description: 'Baseband Guard (BBG) LSM'
+        type: choice
+        options: [Default, 'On', 'Off']
+        default: Default
+
       feature_bbr:
         description: 'TCP congestion control (BBR3 includes BBR)'
         type: choice
@@ -172,6 +178,7 @@ jobs:
           FEATURE_NMS: ${{ inputs.feature_nms }}
           FEATURE_OPT: ${{ inputs.feature_opt }}
           FEATURE_DS: ${{ inputs.feature_ds }}
+          FEATURE_BBG: ${{ inputs.feature_bbg }}
           FEATURE_BBR: ${{ inputs.feature_bbr }}
           FEATURE_TTL: ${{ inputs.feature_ttl }}
           FEATURE_IPSET: ${{ inputs.feature_ip_set }}
@@ -243,6 +250,7 @@ jobs:
             --arg nms "$FEATURE_NMS" \
             --arg opt "$FEATURE_OPT" \
             --arg ds "$FEATURE_DS" \
+            --arg bbg "$FEATURE_BBG" \
             --arg bbr "$FEATURE_BBR" \
             --arg ttl "$FEATURE_TTL" \
             --arg ipset "$FEATURE_IPSET" \
@@ -258,6 +266,7 @@ jobs:
             | .NMS = override(.NMS; $nms)
             | .opt = override(.opt; $opt)
             | .ds = override(.ds; $ds)
+            | .bbg = override(.bbg; $bbg)
             | .ttl = override(.ttl; $ttl)
             | .ip_set = override(.ip_set; $ipset)
             | .unicode = override(.unicode; $unicode)
@@ -481,6 +490,7 @@ jobs:
             echo "| NoMount | ${{ inputs.feature_nms }} |"
             echo "| Optimization patches | ${{ inputs.feature_opt }} |"
             echo "| DroidSpace | ${{ inputs.feature_ds }} |"
+            echo "| BBG (Baseband Guard) | ${{ inputs.feature_bbg }} |"
             echo "| BBR / BBR3 | ${{ inputs.feature_bbr }} |"
             echo "| TTL | ${{ inputs.feature_ttl }} |"
             echo "| IPset | ${{ inputs.feature_ip_set }} |"
