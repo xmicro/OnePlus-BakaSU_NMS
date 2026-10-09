@@ -74,6 +74,65 @@ on:
         required: false
         type: boolean
         default: false
+
+      
+      # Kernel feature overrides
+      # Default = use each device's JSON config
+
+      feature_hmbird:
+        description: 'HMBIRD/Fengchi scheduler patches'
+        type: choice
+        options: [Default, 'On', 'Off']
+        default: Default
+
+      feature_nms:
+        description: 'NoMount hookless root hiding'
+        type: choice
+        options: [Default, 'On', 'Off']
+        default: Default
+
+      feature_opt:
+        description: 'Memory and scheduler optimization patches'
+        type: choice
+        options: [Default, 'On', 'Off']
+        default: Default
+
+      feature_ds:
+        description: 'DroidSpace compatibility and SYSVIPC patches'
+        type: choice
+        options: [Default, 'On', 'Off']
+        default: Default
+
+      feature_bbr:
+        description: 'TCP congestion control (BBR3 includes BBR)'
+        type: choice
+        options: [Default, 'Off', BBR, BBR3]
+        default: Default
+
+      feature_ttl:
+        description: 'Netfilter TTL target support'
+        type: choice
+        options: [Default, 'On', 'Off']
+        default: Default
+
+      feature_ip_set:
+        description: 'IPset and IPv6 NAT support'
+        type: choice
+        options: [Default, 'On', 'Off']
+        default: Default
+
+      feature_unicode:
+        description: 'Unicode path compatibility fix'
+        type: choice
+        options: [Default, 'On', 'Off']
+        default: Default
+
+      feature_ntsync:
+        description: 'NTSync Windows synchronization support'
+        type: choice
+        options: [Default, 'On', 'Off']
+        default: Default
+      
       nomount_ref:
         description: 'NoMount-Suite branch/ref for the Prism engine src + patches (default main; set a branch to validate it before it is released). The engine ships inside the Suite repo, under hookless/.'
         required: false
@@ -105,8 +164,19 @@ jobs:
       - name: 🔍 Generate build matrix
         id: set-matrix
         shell: bash
+        
         env:
-          BUILD_TIMESTAMP_INPUT: ${{ github.event.inputs.build_timestamp }}
+          BUILD_TIMESTAMP_INPUT: ${{ inputs.build_timestamp }}
+          FEATURE_HMBIRD: ${{ inputs.feature_hmbird }}
+          FEATURE_NMS: ${{ inputs.feature_nms }}
+          FEATURE_OPT: ${{ inputs.feature_opt }}
+          FEATURE_DS: ${{ inputs.feature_ds }}
+          FEATURE_BBR: ${{ inputs.feature_bbr }}
+          FEATURE_TTL: ${{ inputs.feature_ttl }}
+          FEATURE_IPSET: ${{ inputs.feature_ip_set }}
+          FEATURE_UNICODE: ${{ inputs.feature_unicode }}
+          FEATURE_NTSYNC: ${{ inputs.feature_ntsync }}
+          
         run: |
           set -euo pipefail
           echo "::group::Matrix generation"
@@ -164,6 +234,51 @@ jobs:
             ')
           else
             echo "ℹ️  No target model selected. Building all configs matching op_model='$input'."
+          fi      
+          # Apply workflow feature selections to device configs.
+          # "Default" preserves each device's original JSON value.
+          filtered=$(jq -c \
+            --arg hmbird "$FEATURE_HMBIRD" \
+            --arg nms "$FEATURE_NMS" \
+            --arg opt "$FEATURE_OPT" \
+            --arg ds "$FEATURE_DS" \
+            --arg bbr "$FEATURE_BBR" \
+            --arg ttl "$FEATURE_TTL" \
+            --arg ipset "$FEATURE_IPSET" \
+            --arg unicode "$FEATURE_UNICODE" \
+            --arg ntsync "$FEATURE_NTSYNC" '
+            def override($current; $setting):
+              if $setting == "On" then true
+              elif $setting == "Off" then false
+              else $current end;
+             
+          map(
+            .hmbird = override(.hmbird; $hmbird)
+            | .NMS = override(.NMS; $nms)
+            | .opt = override(.opt; $opt)
+            | .ds = override(.ds; $ds)
+            | .ttl = override(.ttl; $ttl)
+            | .ip_set = override(.ip_set; $ipset)
+            | .unicode = override(.unicode; $unicode)
+            | .ntsync = override(.ntsync; $ntsync)
+            | (
+              if $bbr == "BBR" then
+                .bbr = true | .bbr3 = false
+              elif $bbr == "BBR3" then
+                .bbr = true | .bbr3 = true
+              elif $bbr == "Off" then
+                .bbr = false | .bbr3 = false
+              else
+                .
+             end
+            )
+          )
+          ' <<< "$filtered")
+         
+          if [[ "${{ inputs.make_release }}" == "true" &&
+            "$FEATURE_NMS" == "Off" ]]; then
+            echo "::error::NMS-disabled releases need separate release metadata handling. Use make_release=false for testing."
+            exit 1
           fi
 
           count=$(jq 'length' <<<"$filtered")
@@ -350,6 +465,15 @@ jobs:
             echo "| 🧩 KSU | $ksu_display |"
             echo "| ⏱️ Timestamp | $build_ts_display |"
             echo "| ⚙️ Optimization | \`${{ inputs.optimize_level }}\` |"
+            echo "| HMBIRD | ${{ inputs.feature_hmbird }} |"
+            echo "| NoMount | ${{ inputs.feature_nms }} |"
+            echo "| Optimization patches | ${{ inputs.feature_opt }} |"
+            echo "| DroidSpace | ${{ inputs.feature_ds }} |"
+            echo "| BBR / BBR3 | ${{ inputs.feature_bbr }} |"
+            echo "| TTL | ${{ inputs.feature_ttl }} |"
+            echo "| IPset | ${{ inputs.feature_ip_set }} |"
+            echo "| Unicode | ${{ inputs.feature_unicode }} |"
+            echo "| NTSync | ${{ inputs.feature_ntsync }} |"
             echo "| 🧹 Clean build (no ccache) | ${{ inputs.clean_build && '✅' || '❌' }} |"
             echo "| 📦 Create release | ${{ inputs.make_release && '✅' || '❌' }} |"
             echo "| 🔄 Toolchain sync | ${{ (inputs.mirror_toolchains || inputs.make_release) && '✅' || '❌' }}${{ (!inputs.mirror_toolchains && inputs.make_release) && ' · auto for release' || '' }} |"
@@ -1018,11 +1142,14 @@ jobs:
               echo "Warning: No JSON entry found for model: $model" >&2
               features_str="N/A"
             else
-              IFS=$'\t' read -r hmbird nms bbr bbr3 bbg ttl ip_set unicode ds ntsync <<< "$feature_flags"
-              
+              IFS=$'\t' read -r hmbird nms bbr bbr3 bbg ttl ip_set unicode ds ntsync <<< "$feature_flags"1
               [[ "$hmbird" == "true" ]] && features+=("🐦 HMBIRD")
               [[ "$nms" == "true" ]] && features+=("🫥 NoMount")
-              { [[ "$bbr" == "true" ]] || [[ "$bbr3" == "true" ]]; } && features+=("🚀 BBR")
+              if [[ "$bbr3" == "true" ]]; then
+                features+=("🚀 BBR3")
+              elif [[ "$bbr" == "true" ]]; then
+                features+=("🚀 BBR")
+              fi
               [[ "$bbg" == "true" ]] && features+=("🛡️ BBG")
               [[ "$ttl" == "true" ]] && features+=("🌐 TTL")
               [[ "$ip_set" == "true" ]] && features+=("🧱 IP_SET & IPv6 NAT")
