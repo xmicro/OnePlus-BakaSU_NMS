@@ -1,5 +1,6 @@
 name: OnePlusOSS Kernel Monitor
 
+on: workflow_dispatch
 
 jobs:
   monitor:
