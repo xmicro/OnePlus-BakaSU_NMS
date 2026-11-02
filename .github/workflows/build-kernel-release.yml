@@ -172,6 +172,7 @@ jobs:
       nomount_version: ${{ steps.set-matrix.outputs.nomount_version }}
       susfs_version: ${{ steps.set-matrix.outputs.susfs_version }}
       susfs_plan: ${{ steps.set-matrix.outputs.susfs_plan }}
+      nomount_enabled: ${{ steps.set-matrix.outputs.nomount_enabled }}
     env:
       GH_TOKEN: ${{ github.token }}
       GH_HTTP_TIMEOUT: 600
