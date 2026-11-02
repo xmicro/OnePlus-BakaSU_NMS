@@ -170,6 +170,8 @@ jobs:
       ksu_resolved_hash:    ${{ steps.set-matrix.outputs.ksu_resolved_hash }}
       ksu_options_normalized: ${{ steps.set-matrix.outputs.ksu_options_normalized }}
       nomount_version: ${{ steps.set-matrix.outputs.nomount_version }}
+      susfs_version: ${{ steps.set-matrix.outputs.susfs_version }}
+      susfs_plan: ${{ steps.set-matrix.outputs.susfs_plan }}
       nomount_enabled: ${{ steps.set-matrix.outputs.nomount_enabled }}
     env:
       GH_TOKEN: ${{ github.token }}
