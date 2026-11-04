@@ -139,7 +139,7 @@ on:
         type: boolean
         default: false
       susfs_ref:
-        description: 'simonpunk/susfs4ksu ref to patch SUSFS into every kernel. auto = the gki branch matching each device, a branch/tag/40-char SHA pins it (a release you want to reproduce should pass a SHA), empty = build without SUSFS.'
+        description: 'simonpunk/susfs4ksu ref to patch SUSFS into every kernel. auto = the gki branch matching each device, a branch/tag/40-char SHA pins it (a release you want to reproduce should pass a SHA), off (also none or -1) = build without SUSFS.'
         required: false
         type: string
         default: auto
@@ -254,7 +254,8 @@ jobs:
             ')
           else
             echo "ℹ️  No target model selected. Building all configs matching op_model='$input'."
-          fi      
+          fi
+
           # Apply workflow feature selections to device configs.
           # "Default" preserves each device's original JSON value.
           filtered=$(jq -c \
@@ -296,9 +297,23 @@ jobs:
             )
           )
           ' <<< "$filtered")
-         
+
+          # Two configs for one device that resolve to the same kernel sublevel
+          # build the same AK3 zip, collide on its name and one silently replaces
+          # the other - 82 legs gave 81 zips in run 41434571727. Drop the
+          # redundant leg here rather than spend 25 minutes on it; the script
+          # keeps the pinned config and is fail-open on anything it cannot
+          # resolve. See .github/scripts/dedupe_matrix.py.
+          echo "$filtered" > matrix_filtered.json
+          if python3 -I .github/scripts/dedupe_matrix.py matrix_filtered.json \
+               -o matrix_deduped.json --manifests manifests; then
+            filtered=$(cat matrix_deduped.json)
+          else
+            echo "::warning::matrix dedupe failed; keeping every leg"
+          fi
+          rm -f matrix_filtered.json matrix_deduped.json
           count=$(jq 'length' <<<"$filtered")
-          
+
           filtered=$(echo "$filtered" | jq '
             sort_by(
               (.os_version | gsub("A"; "") | tonumber) * -1,
@@ -447,6 +462,11 @@ jobs:
           echo "nomount_version=$nomount_version" >> "$GITHUB_OUTPUT"
 
           SUSFS_REF='${{ inputs.susfs_ref }}'
+          # An empty susfs_ref means no SUSFS, but a workflow_dispatch string
+          # input that arrives empty is replaced by its declared default, so
+          # that branch was unreachable from the UI and the API alike. Take an
+          # explicit sentinel instead; -1 is what the standalone builder uses.
+          case "$SUSFS_REF" in off|none|-1) SUSFS_REF="" ;; esac
           susfs_plan="off"
           susfs_version=""
           if [ -n "$SUSFS_REF" ]; then
@@ -455,9 +475,16 @@ jobs:
               branch="gki-$key"
               ref="$SUSFS_REF"; [ "$ref" = auto ] && ref="$branch"
               ver=""
+              # The || true below is what makes these attempts happen. This step
+              # runs under `set -euo pipefail`, so without it a curl -f that gets
+              # an HTTP error returns 22, pipefail hands 22 to the assignment, and
+              # errexit kills the whole matrix job on attempt 1 -- the retries and
+              # the ${ver:-unknown} fallback never run. One throttled GitLab reply
+              # took down a 90-leg dispatch that way (run 41499457662). The version
+              # string only feeds susfs_plan in the summary, so unknown beats dead.
               for attempt in 1 2 3; do
                 ver="$(curl -fsSL --max-time 30 "https://gitlab.com/simonpunk/susfs4ksu/-/raw/$ref/kernel_patches/include/linux/susfs.h" 2>/dev/null \
-                  | sed -n 's/^#define[[:space:]]\+SUSFS_VERSION[[:space:]]\+"\([^"]*\)".*/\1/p' | head -n1)"
+                  | sed -n 's/^#define[[:space:]]\+SUSFS_VERSION[[:space:]]\+"\([^"]*\)".*/\1/p' | head -n1 || true)"
                 [ -n "$ver" ] && break
                 sleep 5
               done
@@ -876,9 +903,39 @@ jobs:
       - name: Summarize build results
         run: |
           set -uo pipefail
-          jobs="$(gh api --paginate \
-            "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" \
-            --jq '.jobs[] | select(.name|startswith("build (")) | "\(.conclusion)\t\(.name)"')"
+
+          # One 502 from the jobs API used to fail this job and redden a run whose
+          # kernels and release were all fine: the step runs under `bash -e`, so the
+          # failed command substitution exited before anything was written, and
+          # --paginate means any single page can do it. This job only writes a
+          # summary and gates nothing, so retry, then degrade to a note rather than
+          # reporting a build failure that did not happen.
+          jobs=""
+          got=""
+          for attempt in 1 2 3 4 5; do
+            if jobs="$(gh api --paginate \
+                "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" \
+                --jq '.jobs[] | select(.name|startswith("build (")) | "\(.conclusion)\t\(.name)"')"; then
+              got=1
+              break
+            fi
+            echo "::warning::jobs API attempt ${attempt} failed"
+            jobs=""
+            if [ "$attempt" -lt 5 ]; then
+              sleep $((attempt * 5))
+            fi
+          done
+
+          if [ -z "$got" ]; then
+            echo "::warning::the jobs API did not answer after 5 attempts; skipping the build report"
+            {
+              echo "## 📋 Build Report"
+              echo ""
+              echo "_The jobs API did not answer, so this report could not be generated._"
+              echo "_Per-device results are on the run's own job list; this step gates nothing._"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
 
           total=$(printf '%s\n' "$jobs" | grep -c . || true)
           ok=$(printf '%s\n'    "$jobs" | grep -c   '^success' || true)
@@ -1173,9 +1230,26 @@ jobs:
             } > release_notes.md
 
             exit 0
-         
+
           fi
-          
+
+          # Three places in these notes name the manager assets, and upstream
+          # stopped building the spoofed one (Baka-SU/BakaSU 01c11c7). Resolve the
+          # wording once here so the summary table, the step-by-step and the
+          # Manager Applications section cannot contradict the actual assets.
+          if [ -n "${MGR_SPOOFED:-}" ]; then
+            MGR_TABLE_ASSET='`BakaSU_<build>_normal.apk` or `_spoofed.apk`'
+            MGR_TABLE_HOW='install **one** - see *Manager Applications*'
+            MGR_INSTALL_LINE="Install the BakaSU Manager APK from this release's Assets - plain or spoofed, one of the two."
+          elif [ -n "${MGR_BUILD:-}" ]; then
+            MGR_TABLE_ASSET='`BakaSU_<build>_normal.apk`'
+            MGR_TABLE_HOW='see *Manager Applications*'
+            MGR_INSTALL_LINE="Install the BakaSU Manager APK from this release's Assets."
+          else
+            MGR_TABLE_ASSET='not attached to this release'
+            MGR_TABLE_HOW='see *Manager Applications*'
+            MGR_INSTALL_LINE="Install a BakaSU Manager APK matching the driver version - see *Manager Applications*."
+          fi
           declare -A device_info
 
           JSON_BUILD_DATA=$(jq -c '.' ./downloaded-artifacts/matrix.json)
@@ -1227,7 +1301,7 @@ jobs:
           | | Download | Where it's from | How to install |
           |---|---|---|---|
           | 1️⃣ **Kernel** | \`AK3_<device>_…zip\` (pick yours below) | built by this repo's CI | Kernel Flasher / BakaSU Manager |
-          | 2️⃣ **BakaSU Manager** | \`BakaSU_<build>_normal.apk\` or \`_spoofed.apk\` | upstream CI, fetched at release time | install **one** - see *Manager Applications* |
+          | 2️⃣ **BakaSU Manager** | $MGR_TABLE_ASSET | upstream CI, fetched at release time | $MGR_TABLE_HOW |
           | 3️⃣ **NoMount Suite** | \`$MOD_ASSET\` | the separate [NoMount project](${{ github.server_url }}/${MOD_REPO}/releases/latest) | BakaSU Manager → Modules → Install from storage |
 
           > The kernel has NoMount **compiled in but dormant** — the **NoMount Suite module activates it**. You need both.
@@ -1427,7 +1501,7 @@ jobs:
           
           ### Official Manager
           EOF
-          if [ -n "${MGR_BUILD:-}" ]; then
+          if [ -n "${MGR_BUILD:-}" ] && [ -n "${MGR_SPOOFED:-}" ]; then
           NPKG=""; [ -z "${MGR_NORMAL_PKG:-}" ] || NPKG=" (\`$MGR_NORMAL_PKG\`)"
           SPKG=""; [ -z "${MGR_SPOOFED_PKG:-}" ] || SPKG=" (\`$MGR_SPOOFED_PKG\`)"
           cat << EOF >> release_notes.md
@@ -1436,9 +1510,16 @@ jobs:
             - \`${MGR_SPOOFED}\`: the same app under a randomised package name${SPKG}, so a scan of installed packages does not find a known root manager
             Upstream ships both under the same filename, so they are renamed here. Both carry the same signing certificate, which is the only thing the kernel checks. arm64-v8a only.
           EOF
+          elif [ -n "${MGR_BUILD:-}" ]; then
+          NPKG=""; [ -z "${MGR_NORMAL_PKG:-}" ] || NPKG=" (\`$MGR_NORMAL_PKG\`)"
+          cat << EOF >> release_notes.md
+          - **BakaSU Manager** build **${MGR_BUILD}**, fetched from the upstream [Build Manager run ${MGR_RUN}](https://github.com/Baka-SU/BakaSU/actions/runs/${MGR_RUN}) at commit \`${MGR_SHA:0:8}\`${MGR_NOTE}:
+            - \`${MGR_NORMAL}\`: the plain package${NPKG}, arm64-v8a only
+            No spoofed package is attached. Upstream dropped that build in [\`01c11c7\`](https://github.com/Baka-SU/BakaSU/commit/01c11c7) on 2026-10-31 — Magisk removed Hide Magisk in v31.1, and upstream points at [HMA](https://github.com/Dr-TSNG/Hide-My-Applist) or its fork [HMA-OSS](https://github.com/frknkrc44/HMA-OSS) for hiding the manager from an installed-package scan.
+          EOF
           else
           cat << EOF >> release_notes.md
-          - **BakaSU Manager**: not attached to this release, upstream had no manager build to pair with driver ${ksu_ver_global}. Take the \`Manager-release\` and \`Spoofed-Manager-release\` artifacts of the matching commit from the [upstream Build Manager workflow](https://github.com/Baka-SU/BakaSU/actions/workflows/build-manager.yml).
+          - **BakaSU Manager**: not attached to this release, upstream had no manager build to pair with driver ${ksu_ver_global}. Take the \`Manager-release\` artifact of the matching commit from the [upstream Build Manager workflow](https://github.com/Baka-SU/BakaSU/actions/workflows/build-manager.yml).
           EOF
           fi
           cat << EOF >> release_notes.md
@@ -1461,7 +1542,7 @@ jobs:
           ### Via Kernel Flasher
           1. Download the correct AnyKernel3 ZIP for your device.
           2. Flash the ZIP to the active slot using Kernel Flasher.
-          3. Install the BakaSU Manager APK from this release's Assets - plain or spoofed, one of the two.
+          3. $MGR_INSTALL_LINE
           4. Open the BakaSU app.
           5. In **BakaSU Manager**, install the **NoMount Suite** module (Modules → Install from storage → the NoMount Suite ZIP from this release). Remove any existing metamodule and reboot first if you have one.
           6. Reboot the device.
