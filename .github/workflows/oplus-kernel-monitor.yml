@@ -1,9 +1,6 @@
 name: OnePlusOSS Kernel Monitor
 
-on:
-  schedule:
-    - cron: '0 */12 * * *' # Execute every 12 Hrs
-  workflow_dispatch:
+on: workflow_dispatch
 
 jobs:
   monitor:
