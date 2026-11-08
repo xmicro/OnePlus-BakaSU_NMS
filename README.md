@@ -1,6 +1,6 @@
 <div align="center">
 
-# OnePlus · BakaSU · NoMount · SuSfS
+# OnePlus · BakaSU · NoMount · SuSfS 2.4.0
 
 ### A custom OnePlus kernel + a **mountless** hiding add-on
 
@@ -34,13 +34,16 @@ Every release contains two things. Flash the kernel first, then add NoMount Suit
 > [!IMPORTANT]
 > **The kernel on its own does nothing visible.** NoMount is *compiled in* but stays **dormant** until the **NoMount Suite** module activates it. NoMount Suite is the part that carries your injection rules, the WebUI, and the spoofing. Think of it like a Magisk/KSU module. **You need both.**
 
-## SUSFS
+## SUSFS (v2.4.0)
 
 Every kernel has **SUSFS** compiled in, patched from [simonpunk/susfs4ksu](https://gitlab.com/simonpunk/susfs4ksu)
 at build time (the version is in the release notes and the build summary).
 
 The `susfs_ref` workflow input picks the susfs4ksu ref: `auto` follows the gki branch of each device,
 a 40-char SHA pins a release, empty builds without SUSFS.
+
+SUSFS `v2.3.0` and `v2.4.0` are accepted. A newer one fails the build rather than producing a
+half-patched kernel, so pin `susfs_ref` if `auto` moves ahead of this repo.
 
 ---
 
@@ -81,10 +84,8 @@ redirection inside the kernel:
 ## What else is in the kernel
 
 - **BakaSU**, kernel-level root.
-- **AutoFDO**, profile-guided codegen on the 6.6 and 6.12 Snapdragon targets, using the
-  AOSP profile matched to each kernel sublevel.
-- **MLGO register allocation**, ML-guided allocation on the 6.12 Snapdragon targets whose
-  toolchain ships the model.
+- **AutoFDO**, profile-guided codegen using the AOSP profile matched to each kernel sublevel.
+- **MLGO register allocation**, ML-guided allocation on targets whose toolchain ships the model.
 - **BORE** (Burst-Oriented Response Enhancer), a scheduler that favours low-burst interactive
   tasks. On by default; `sched_bore` in `/proc/sys/kernel` turns it off at runtime without a
   reboot.

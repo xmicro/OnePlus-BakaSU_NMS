@@ -26,6 +26,16 @@ inputs:
     required: false
     type: string
     default: O2
+  enable_mlgo:
+    description: 'MLGO: ML-guided register allocation (the AOT eviction model inside AOSP clang). ON by default.'
+    required: false
+    type: boolean
+    default: true
+  enable_afdo:
+    description: 'AutoFDO: profile-guided codegen from the AOSP profile shipped in the tree. ON by default.'
+    required: false
+    type: boolean
+    default: true
   clean:
     description: 'Force clean build without ccache acceleration'
     required: false
@@ -192,6 +202,8 @@ runs:
         ntsync="$OP_NTSYNC"
         blacklist_modules="$OP_BLACKLIST_MODULES"
         optimize='${{ inputs.optimize_level }}'
+        mlgo='${{ inputs.enable_mlgo }}'
+        afdo='${{ inputs.enable_afdo }}'
         
         errors=()
         
@@ -341,6 +353,16 @@ runs:
         case "$optimize" in
           O2|O3) ;;
           *) errors+=("optimize_level must be O2 or O3. Got: '$optimize'"); ;;
+        esac
+        
+        case "$mlgo" in
+          true|false|'') ;;
+          *) errors+=("enable_mlgo must be 'true' or 'false'. Got: '$mlgo'"); ;;
+        esac
+        
+        case "$afdo" in
+          true|false|'') ;;
+          *) errors+=("enable_afdo must be 'true' or 'false'. Got: '$afdo'"); ;;
         esac
         
         if [ ${#errors[@]} -ne 0 ]; then
@@ -2141,7 +2163,7 @@ runs:
         set -u
         
         echo '#!/bin/bash' > "$COMMON_KERNEL_FOLDER/ld-wrapper"
-        echo 'ld.lld "$@" --thinlto-jobs=$(nproc --all)' >> "$COMMON_KERNEL_FOLDER/ld-wrapper"
+        echo 'ld.lld "$@" --thinlto-jobs=$(nproc --all) ${NMS_LD_MLLVM:-}' >> "$COMMON_KERNEL_FOLDER/ld-wrapper"
         chmod +x "$COMMON_KERNEL_FOLDER/ld-wrapper"
         
         KERNEL_BUILD_DATE=$(date -u)
@@ -2226,31 +2248,95 @@ runs:
             ;;
         esac
         
-        case "${{ env.OP_LTO}}" in
-          none)
-            if [ "$OP_BRANCH" = "wild/mt6993" ]; then
-              echo "   MLGO regalloc advisor skipped on $OP_BRANCH"
+        # Only `false` turns these off. An empty value means a caller that did not set the
+        # input, and both are on by default, so it must not fail the build.
+        MLGO_ON=false
+        MLGO_ROUTE=none
+        if [ "${{ inputs.enable_mlgo }}" = false ]; then
+          echo "   MLGO regalloc advisor off: enable_mlgo=false"
+        elif [ "$OP_BRANCH" = "wild/mt6993" ]; then
+          echo "   MLGO regalloc advisor skipped on $OP_BRANCH"
+        else
+          MLGO_PROBE="${RUNNER_TEMP:-/tmp}/mlgo_probe.c"
+          MLGO_ERR="${RUNNER_TEMP:-/tmp}/mlgo_probe.err"
+          # 16 live values on purpose: a trivial function gives the allocator no eviction
+          # decision to make, so the release advisor is never consulted and the probe
+          # passes on a clang that carries no model.
+          printf '%s' 'long f(long*a){long s=0,b=1,c=2,d=3,e=4,g=5,h=6,i=7,j=8,k=9,l=10,m=11,n=12,o=13,p=14,q=15;for(int x=0;x<16;x++){s+=a[x]^b;b*=a[x]+c;c^=a[x]|d;d+=a[x]&e;e*=a[x]^g;g+=a[x]+h;h^=a[x]*i;i+=a[x]^j;j*=a[x]+k;k^=a[x]|l;l+=a[x]&m;m*=a[x]^n;n+=a[x]+o;o^=a[x]*p;p+=a[x]^q;q*=a[x]+s;}return s^b^c^d^e^g^h^i^j^k^l^m^n^o^p^q;}' > "$MLGO_PROBE"
+          if [ "${{ env.OP_LTO}}" = none ]; then
+            if clang -O2 -mllvm -regalloc-enable-advisor=release --target=aarch64-linux-gnu -c "$MLGO_PROBE" -o /dev/null >"$MLGO_ERR" 2>&1; then
+              KCFLAGS_EXTRA="-mllvm -regalloc-enable-advisor=release ${KCFLAGS_EXTRA}"
+              MLGO_ON=true
+              MLGO_ROUTE=KCFLAGS
+              echo "🧠 MLGO regalloc advisor enabled (compile time)"
             else
-              MLGO_PROBE="${RUNNER_TEMP:-/tmp}/mlgo_probe.c"
-              printf '%s' 'long f(long*a){long s=0,b=1,c=2,d=3,e=4,g=5,h=6,i=7,j=8,k=9,l=10,m=11,n=12,o=13,p=14,q=15;for(int x=0;x<16;x++){s+=a[x]^b;b*=a[x]+c;c^=a[x]|d;d+=a[x]&e;e*=a[x]^g;g+=a[x]+h;h^=a[x]*i;i+=a[x]^j;j*=a[x]+k;k^=a[x]|l;l+=a[x]&m;m*=a[x]^n;n+=a[x]+o;o^=a[x]*p;p+=a[x]^q;q*=a[x]+s;}return s^b^c^d^e^g^h^i^j^k^l^m^n^o^p^q;}' > "$MLGO_PROBE"
-              if clang -O2 -mllvm -regalloc-enable-advisor=release --target=aarch64-linux-gnu -c "$MLGO_PROBE" -o /dev/null >/dev/null 2>&1; then
-                KCFLAGS_EXTRA="-mllvm -regalloc-enable-advisor=release ${KCFLAGS_EXTRA}"
-                echo "🧠 MLGO regalloc advisor enabled"
+              echo "   MLGO regalloc advisor unavailable: this clang has no AOT regalloc-eviction model"
+              # A toolchain that predates the advisor rejects the flag outright, and
+              # that is a permanent, expected state for the older prebuilts -- 6 of the
+              # 82 A16 configs are on clang-r416183c (LLVM 12). Annotating it as a
+              # warning on every build of those devices just teaches you to scroll
+              # past warnings. Anything OTHER than "flag not recognised" means the
+              # advisor IS there and the probe failed for some other reason, which is
+              # worth stopping on.
+              # Two messages, both permanent and expected. clang 12 (r416183c, 6 configs)
+              # does not know the flag: "Unknown command line argument". Every other
+              # model-less toolchain knows it and has no AOT model linked in:
+              # "Requested regalloc eviction advisor analysis could be created" -- which is
+              # r450784e (13) + r487747c (33, its banner even says -mlgo) + ZyC (14) = 60 of
+              # 82 configs, measured 2026-11-08. Matching only the first string annotated
+              # those 60 on every build, which is the noise this guard exists to prevent.
+              if grep -qE "Unknown command line argument|regalloc eviction advisor analysis could" "$MLGO_ERR"; then
+                echo "   MLGO compile probe declined on $CLANG_VERSION: this toolchain carries no usable regalloc advisor (no annotation: expected, permanent)"
               else
-                echo "   MLGO regalloc advisor unavailable: this clang has no AOT regalloc-eviction model"
+                echo "::warning::MLGO compile probe declined on $CLANG_VERSION: $(tr '\n' ' ' < "$MLGO_ERR" | head -c 300)"
               fi
-              rm -f "$MLGO_PROBE"
             fi
-            ;;
-          *)
-            echo "   MLGO regalloc advisor not applicable on LTO=${{ env.OP_LTO}}: regalloc runs at link time"
-            ;;
-        esac
+          else
+            # Under LTO the compile step only emits bitcode and regalloc runs inside lld, in
+            # another process, so a compile-time -mllvm never reaches it. Measured on clang
+            # 21 aarch64: -mllvm -regalloc=fast at compile time changed nothing (77 insns,
+            # same as no flag), the same flag at link time changed everything (126). So it
+            # goes to the linker via ld-wrapper, and the probe has to link too.
+            if clang --target=aarch64-linux-gnu -O2 -flto=thin -fuse-ld=lld -nostdlib -shared "$MLGO_PROBE" -o /dev/null -Wl,-mllvm=-regalloc-enable-advisor=release >"$MLGO_ERR" 2>&1; then
+              export NMS_LD_MLLVM="-mllvm=-regalloc-enable-advisor=release"
+              MLGO_ON=true
+              MLGO_ROUTE=linker
+              echo "🧠 MLGO regalloc advisor enabled (link time, LTO=${{ env.OP_LTO}})"
+            else
+              echo "   MLGO regalloc advisor unavailable at link time: this lld has no AOT regalloc-eviction model"
+              # A toolchain that predates the advisor rejects the flag outright, and
+              # that is a permanent, expected state for the older prebuilts -- 6 of the
+              # 82 A16 configs are on clang-r416183c (LLVM 12). Annotating it as a
+              # warning on every build of those devices just teaches you to scroll
+              # past warnings. Anything OTHER than "flag not recognised" means the
+              # advisor IS there and the probe failed for some other reason, which is
+              # worth stopping on.
+              # Two messages, both permanent and expected. clang 12 (r416183c, 6 configs)
+              # does not know the flag: "Unknown command line argument". Every other
+              # model-less toolchain knows it and has no AOT model linked in:
+              # "Requested regalloc eviction advisor analysis could be created" -- which is
+              # r450784e (13) + r487747c (33, its banner even says -mlgo) + ZyC (14) = 60 of
+              # 82 configs, measured 2026-11-08. Matching only the first string annotated
+              # those 60 on every build, which is the noise this guard exists to prevent.
+              if grep -qE "Unknown command line argument|regalloc eviction advisor analysis could" "$MLGO_ERR"; then
+                echo "   MLGO link probe declined on $CLANG_VERSION: this toolchain carries no usable regalloc advisor (no annotation: expected, permanent)"
+              else
+                echo "::warning::MLGO link probe declined on $CLANG_VERSION: $(tr '\n' ' ' < "$MLGO_ERR" | head -c 300)"
+              fi
+            fi
+          fi
+          rm -f "$MLGO_PROBE" "$MLGO_ERR"
+        fi
 
         AFDO_ON=false
         AFDO_PROFILE=""
         AFDO_ARGS=()
-        case "$OP_BRANCH" in
+        AFDO_BRANCH="$OP_BRANCH"
+        if [ "${{ inputs.enable_afdo }}" = false ]; then
+          echo "   AutoFDO off: enable_afdo=false"
+          AFDO_BRANCH=disabled
+        fi
+        case "$AFDO_BRANCH" in
           wild/sm8750|wild/sm8850|wild/sm8845)
             for p in "$COMMON_KERNEL_FOLDER/gki/aarch64/afdo/kernel.afdo" "$COMMON_KERNEL_FOLDER/android/gki/aarch64/afdo/kernel.afdo"; do
               if [ -f "$p" ]; then AFDO_PROFILE="$p"; break; fi
@@ -2346,6 +2432,7 @@ runs:
         echo "KCFLAGS: ${KCFLAGS:0:150}..."
         echo "KCPPFLAGS: ${KCPPFLAGS:0:150}..."
         if [ "$AFDO_ON" = true ]; then echo "AutoFDO: $AFDO_PROFILE"; else echo "AutoFDO: off"; fi
+        echo "MLGO: $MLGO_ON (route: $MLGO_ROUTE)"
         echo "Timestamp: $KBUILD_BUILD_TIMESTAMP"
         echo "Workspace: $WORKSPACE"
         
